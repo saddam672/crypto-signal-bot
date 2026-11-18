@@ -371,80 +371,68 @@ def get_price_trigger_zone(price, support, resistance):
     return zone, details
 
 # ============================================================
-# ৮. ফিউচার ডেটা ফেচ (OKX Futures API - No Geo-Block)
+# ৫. কুয়োকয়েন (KuCoin Futures) ডেটা ফেচ ও পেয়ার লোড
 # ============================================================
 @st.cache_data(ttl=300)
 def fetch_klines(symbol, interval="1h", limit=100):
     try:
-        # BTCUSDT কে OKX ফরম্যাট BTC-USDT-SWAP এ রূপান্তর
-        clean_sym = symbol.replace("USDT", "").replace("-SWAP", "").replace("-", "")
-        okx_inst = f"{clean_sym}-USDT-SWAP"
+        # KUCOIN ফরম্যাট: যেমন BTCUSDT -> XBTUSDTM বা BTCUSDTM
+        clean_sym = symbol.replace("USDT", "").replace("USDTM", "")
+        if clean_sym == "BTC": clean_sym = "XBT"
+        kucoin_symbol = f"{clean_sym}USDTM"
         
-        # টাইমফ্রেম ম্যাপিং
-        bar_map = {"1h": "1H", "2h": "2H", "4h": "4H", "1d": "1D"}
-        bar = bar_map.get(interval.lower(), "1H")
+        granularity_map = {"1h": "1hour", "2h": "2hour", "4h": "4hour", "1d": "1day"}
+        granularity = granularity_map.get(interval.lower(), "1hour")
         
-        url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={bar}&limit={limit}"
+        url = f"https://api-futures.kucoin.com/api/v1/kline/query?symbol={kucoin_symbol}&granularity={granularity}&limit={limit}"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        res_json = resp.json()
+        res = resp.json()
         
-        if res_json.get('code') != '0' or not res_json.get('data'):
+        if res.get('code') != '200000' or not res.get('data'):
             return None
             
-        data = res_json['data']
-        # OKX লেটেস্ট ক্যান্ডেল আগে দেয়, তাই উল্টে (reverse) নিতে হবে
+        data = res['data']
+        # কুয়োকয়েন লেটেস্ট আগে দেয়, তাই রিভার্স করতে হবে
         data.reverse()
         
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'volCcy', 'volCcyQuote', 'confirm'
-        ])
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
         df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         return None
 
-# ============================================================
-# ৯. ফিউচার পেয়ার লোড (OKX Futures API)
-# ============================================================
 @st.cache_data(ttl=3600)
 def get_all_usdt_pairs(min_volume_usdt=500000):
     try:
-        url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
+        url = "https://api-futures.kucoin.com/api/v1/ticker/all-tickers"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        res_json = resp.json()
+        res = resp.json()
         
-        if res_json.get('code') != '0':
+        if res.get('code') != '200000':
             return []
             
-        data = res_json.get('data', [])
+        tickers = res.get('data', {}).get('ticker', [])
         usdt_pairs = []
-        for item in data:
-            inst_id = item['instId'] # যেমন: BTC-USDT-SWAP
-            if inst_id.endswith('-USDT-SWAP'):
-                # আগের কোডের সাথে মিল রাখতে BTCUSDT ফরম্যাটে নাম রাখা হচ্ছে
-                symbol = inst_id.replace('-USDT-SWAP', 'USDT')
-                if any(x in symbol for x in ['USDC', 'BUSD', 'DAI', 'TUSD']):
-                    continue
+        for item in tickers:
+            sym = item.get('symbol', '')
+            if sym.endswith('USDTM'):
+                base_sym = sym.replace('USDTM', '')
+                if base_sym == 'XBT': base_sym = 'BTC'
+                symbol = f"{base_sym}USDT"
+                
                 try:
-                    last_price = float(item['last'])
-                    # ২৪ ঘণ্টার কন্ট্রাক্ট ভলিউমকে USDT ভলিউমে রূপান্তর
-                    volume_usdt = float(item['volCcy24h']) * last_price
-                    if volume_usdt < min_volume_usdt:
-                        continue
-                    usdt_pairs.append({
-                        'symbol': symbol,
-                        'volume': volume_usdt,
-                        'price': last_price
-                    })
+                    price = float(item.get('price', 0))
+                    turnover = float(item.get('turnoverOf24h', 0)) # USDT ভলিউম
+                    if turnover < min_volume_usdt: continue
+                    usdt_pairs.append({'symbol': symbol, 'volume': turnover, 'price': price})
                 except:
                     continue
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
         return usdt_pairs
     except Exception as e:
-        st.error(f"ফিউচার পেয়ার লোড করতে ব্যর্থ: {e}")
         return []
 # ============================================================
 # ১০. সিগন্যাল জেনারেটর
