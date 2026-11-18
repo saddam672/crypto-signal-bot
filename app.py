@@ -416,15 +416,16 @@ def calculate_atr(df, period=14):
         return (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.5
 
 # ============================================================
-# ৯. ফিউচার পেয়ার লোড (KuCoin Futures - আপডেটেড)
+# ৯. ফিউচার পেয়ার লোড (KuCoin Futures - সঠিক এন্ডপয়েন্ট সহ)
 # ============================================================
 @st.cache_data(ttl=3600)
 def get_all_usdt_pairs(min_volume_usdt=500000):
     try:
-        url = "https://api-futures.kucoin.com/api/v1/ticker/all-tickers"
+        # সঠিক URL: /api/v1/allTickers
+        url = "https://api-futures.kucoin.com/api/v1/allTickers"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        res = res.json()
+        res = resp.json()
         
         if res.get('code') != '200000':
             return []
