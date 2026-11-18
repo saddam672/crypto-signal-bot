@@ -371,70 +371,81 @@ def get_price_trigger_zone(price, support, resistance):
     return zone, details
 
 # ============================================================
-# ৮. ফিউচার ডেটা ফেচ (আপডেটেড)
+# ৮. ফিউচার ডেটা ফেচ (OKX Futures API - No Geo-Block)
 # ============================================================
 @st.cache_data(ttl=300)
 def fetch_klines(symbol, interval="1h", limit=100):
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        # BTCUSDT কে OKX ফরম্যাট BTC-USDT-SWAP এ রূপান্তর
+        clean_sym = symbol.replace("USDT", "").replace("-SWAP", "").replace("-", "")
+        okx_inst = f"{clean_sym}-USDT-SWAP"
+        
+        # টাইমফ্রেম ম্যাপিং
+        bar_map = {"1h": "1H", "2h": "2H", "4h": "4H", "1d": "1D"}
+        bar = bar_map.get(interval.lower(), "1H")
+        
+        url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={bar}&limit={limit}"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
+        res_json = resp.json()
+        
+        if res_json.get('code') != '0' or not res_json.get('data'):
+            return None
+            
+        data = res_json['data']
+        # OKX লেটেস্ট ক্যান্ডেল আগে দেয়, তাই উল্টে (reverse) নিতে হবে
+        data.reverse()
+        
         df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'volCcy', 'volCcyQuote', 'confirm'
         ])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].astype(float)
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         return None
 
-def calculate_atr(df, period=14):
-    try:
-        tr1 = df['high'] - df['low']
-        tr2 = abs(df['high'] - df['close'].shift())
-        tr3 = abs(df['low'] - df['close'].shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(period).mean().iloc[-1]
-    except:
-        return (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.5
-
 # ============================================================
-# ৯. ফিউচার পেয়ার লোড (আপডেটেড - PERP ফিল্টার বাদ)
+# ৯. ফিউচার পেয়ার লোড (OKX Futures API)
 # ============================================================
 @st.cache_data(ttl=3600)
 def get_all_usdt_pairs(min_volume_usdt=500000):
     try:
-        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
+        res_json = resp.json()
+        
+        if res_json.get('code') != '0':
+            return []
+            
+        data = res_json.get('data', [])
         usdt_pairs = []
         for item in data:
-            symbol = item['symbol']
-            if symbol.endswith('USDT'):
-                # শুধু স্পটের UP/DOWN/BEAR/BULL পেয়ার বাদ দেওয়া হচ্ছে
-                if any(x in symbol for x in ['UP', 'DOWN', 'BEAR', 'BULL', 'USDC', 'BUSD', 'DAI', 'TUSD']):
+            inst_id = item['instId'] # যেমন: BTC-USDT-SWAP
+            if inst_id.endswith('-USDT-SWAP'):
+                # আগের কোডের সাথে মিল রাখতে BTCUSDT ফরম্যাটে নাম রাখা হচ্ছে
+                symbol = inst_id.replace('-USDT-SWAP', 'USDT')
+                if any(x in symbol for x in ['USDC', 'BUSD', 'DAI', 'TUSD']):
                     continue
                 try:
-                    volume = float(item['quoteVolume'])
-                    if volume < min_volume_usdt:
+                    last_price = float(item['last'])
+                    # ২৪ ঘণ্টার কন্ট্রাক্ট ভলিউমকে USDT ভলিউমে রূপান্তর
+                    volume_usdt = float(item['volCcy24h']) * last_price
+                    if volume_usdt < min_volume_usdt:
                         continue
                     usdt_pairs.append({
                         'symbol': symbol,
-                        'volume': volume,
-                        'price': float(item['lastPrice'])
+                        'volume': volume_usdt,
+                        'price': last_price
                     })
                 except:
                     continue
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
         return usdt_pairs
     except Exception as e:
-        st.error(f"ফিউচার পেয়ার লোড করতে ব্যর্থ: {e}")
+        st.error(f"ফিউচার পেয়ার লোড করতে ব্যর্থ: {e}")
         return []
-
 # ============================================================
 # ১০. সিগন্যাল জেনারেটর
 # ============================================================
