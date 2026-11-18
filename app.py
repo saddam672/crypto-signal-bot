@@ -371,22 +371,36 @@ def get_price_trigger_zone(price, support, resistance):
     return zone, details
 
 # ============================================================
-# ৮. ফিউচার ডেটা ফেচ (আপডেটেড)
+# ৮. ফিউচার ডেটা ফেচ (KuCoin Futures - আপডেটেড)
 # ============================================================
 @st.cache_data(ttl=300)
 def fetch_klines(symbol, interval="1h", limit=100):
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        # সিম্বল রূপান্তর: যেমন BTCUSDT -> XBTUSDTM
+        clean_sym = symbol.replace("USDT", "").replace("USDTM", "")
+        if clean_sym == "BTC": 
+            clean_sym = "XBT"
+        kucoin_symbol = f"{clean_sym}USDTM"
+        
+        # টাইমফ্রেম ম্যাপিং
+        granularity_map = {"1h": "1hour", "2h": "2hour", "4h": "4hour", "1d": "1day"}
+        granularity = granularity_map.get(interval.lower(), "1hour")
+        
+        url = f"https://api-futures.kucoin.com/api/v1/kline/query?symbol={kucoin_symbol}&granularity={granularity}&limit={limit}"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].astype(float)
+        res = resp.json()
+        
+        if res.get('code') != '200000' or not res.get('data'):
+            return None
+            
+        data = res['data']
+        # কুয়োকয়েন লেটেস্ট ডেটা আগে দেয়, তাই টাইম অনুযায়ী সাজাতে রিভার্স করতে হবে
+        data.reverse()
+        
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
+        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         return None
@@ -402,39 +416,49 @@ def calculate_atr(df, period=14):
         return (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.5
 
 # ============================================================
-# ৯. ফিউচার পেয়ার লোড (আপডেটেড - PERP ফিল্টার বাদ)
+# ৯. ফিউচার পেয়ার লোড (KuCoin Futures - আপডেটেড)
 # ============================================================
 @st.cache_data(ttl=3600)
 def get_all_usdt_pairs(min_volume_usdt=500000):
     try:
-        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        url = "https://api-futures.kucoin.com/api/v1/ticker/all-tickers"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
+        res = res.json()
+        
+        if res.get('code') != '200000':
+            return []
+            
+        tickers = res.get('data', {}).get('ticker', [])
         usdt_pairs = []
-        for item in data:
-            symbol = item['symbol']
-            if symbol.endswith('USDT'):
-                # শুধু স্পটের UP/DOWN/BEAR/BULL পেয়ার বাদ দেওয়া হচ্ছে
+        for item in tickers:
+            sym = item.get('symbol', '')
+            if sym.endswith('USDTM'):
+                base_sym = sym.replace('USDTM', '')
+                if base_sym == 'XBT': 
+                    base_sym = 'BTC'
+                symbol = f"{base_sym}USDT"
+                
+                # অপ্রয়োজনীয় বা স্পট রিলেটেড টোকেন বাদ দেওয়া
                 if any(x in symbol for x in ['UP', 'DOWN', 'BEAR', 'BULL', 'USDC', 'BUSD', 'DAI', 'TUSD']):
                     continue
                 try:
-                    volume = float(item['quoteVolume'])
+                    price = float(item.get('price', 0))
+                    volume = float(item.get('turnoverOf24h', 0)) # ২৪ ঘণ্টার USDT টার্নওভার/ভলিউম
                     if volume < min_volume_usdt:
                         continue
                     usdt_pairs.append({
                         'symbol': symbol,
                         'volume': volume,
-                        'price': float(item['lastPrice'])
+                        'price': price
                     })
                 except:
                     continue
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
         return usdt_pairs
     except Exception as e:
-        st.error(f"ফিউচার পেয়ার লোড করতে ব্যর্থ: {e}")
+        st.error(f"ফিউচার পেয়ার লোড করতে ব্যর্থ: {e}")
         return []
-
 # ============================================================
 # ১০. সিগন্যাল জেনারেটর
 # ============================================================
